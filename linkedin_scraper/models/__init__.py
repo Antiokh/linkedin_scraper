@@ -3,7 +3,7 @@
 from .person import Person, Experience, Education, Contact, Accomplishment, Interest
 from .company import Company, CompanySummary, Employee
 from .job import Job
-from .post import Post
+from .post import Post, PublishResult
 
 __all__ = [
     "Person",
@@ -17,4 +17,5 @@ __all__ = [
     "Employee",
     "Job",
     "Post",
+    "PublishResult",
 ]

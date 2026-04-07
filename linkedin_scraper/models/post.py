@@ -29,3 +29,21 @@ class Post(BaseModel):
             f"  Reactions: {self.reactions_count}\n"
             f"  Comments: {self.comments_count}>"
         )
+
+
+class PublishResult(BaseModel):
+    actor: str
+    dry_run: bool = True
+    composer_opened: bool = False
+    text_filled: bool = False
+    submitted: bool = False
+    visibility: Optional[str] = None
+    destination_url: Optional[str] = None
+    post_url: Optional[str] = None
+    message: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.model_dump()
+
+    def to_json(self, **kwargs) -> str:
+        return self.model_dump_json(**kwargs)
