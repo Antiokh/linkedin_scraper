@@ -86,20 +86,32 @@ async def detect_rate_limit(page: Page) -> None:
     except Exception:
         pass
     
-    # Check for rate limit messages
+    # Check for rate limit messages. LinkedIn sometimes renders transient
+    # challenge copy during early page hydration, so confirm it persists
+    # before treating it as a real block.
+    phrases = [
+        'too many requests',
+        'rate limit',
+        'slow down',
+        'try again later',
+    ]
     try:
         body_text = await page.locator('body').text_content(timeout=1000)
         if body_text:
             body_lower = body_text.lower()
-            if any(phrase in body_lower for phrase in [
-                'too many requests',
-                'rate limit',
-                'slow down',
-                'try again later'
-            ]):
-                raise RateLimitError(
-                    "Rate limit message detected on page.",
-                    suggested_wait_time=1800  # 30 minutes
+            matched = next((phrase for phrase in phrases if phrase in body_lower), None)
+            if matched:
+                await asyncio.sleep(2)
+                body_text_retry = await page.locator('body').text_content(timeout=1500)
+                body_retry_lower = (body_text_retry or '').lower()
+                if matched in body_retry_lower:
+                    raise RateLimitError(
+                        f"Rate limit message detected on page: '{matched}'.",
+                        suggested_wait_time=1800  # 30 minutes
+                    )
+                logger.info(
+                    "Ignoring transient rate limit marker during page hydration: %s",
+                    matched,
                 )
     except PlaywrightTimeoutError:
         pass

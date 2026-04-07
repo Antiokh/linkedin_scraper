@@ -1,6 +1,7 @@
 """Person/Profile scraper for LinkedIn."""
 
 import logging
+import re
 from typing import Optional
 from urllib.parse import urljoin
 from playwright.async_api import Page
@@ -112,10 +113,48 @@ class PersonScraper(BaseScraper):
     async def _get_name_and_location(self) -> tuple[str, Optional[str]]:
         """Extract name and location from profile."""
         try:
-            name = await self.safe_extract_text("h1", default="Unknown")
-            location = await self.safe_extract_text(
-                ".text-body-small.inline.t-black--light.break-words", default=""
+            name = "Unknown"
+            location = ""
+
+            for selector in [
+                "h1",
+                "main h2",
+            ]:
+                locator = self.page.locator(selector)
+                if await locator.count() > 0:
+                    texts = await locator.evaluate_all(
+                        """(els) => els
+                        .map((el) => el.textContent?.trim())
+                        .filter(Boolean)"""
+                    )
+                    if texts:
+                        name = texts[0]
+                        break
+
+            if name == "Unknown":
+                title = await self.page.title()
+                if title and " | LinkedIn" in title:
+                    name = title.replace(" | LinkedIn", "").strip() or "Unknown"
+
+            main_text = await self.page.locator("main").evaluate(
+                "(el) => el.innerText.slice(0, 1200)"
             )
+            lines = [line.strip() for line in main_text.splitlines() if line.strip()]
+            for line in lines[:20]:
+                line_lower = line.lower()
+                if (
+                    "," in line
+                    and len(line) <= 80
+                    and "|" not in line
+                    and "followers" not in line_lower
+                    and "connections" not in line_lower
+                    and "contact info" not in line_lower
+                    and "show details" not in line_lower
+                    and line != name
+                ):
+                    location = line
+                    break
+
             return name, location if location else None
         except Exception as e:
             logger.warning(f"Error getting name/location: {e}")
@@ -124,32 +163,41 @@ class PersonScraper(BaseScraper):
     async def _check_open_to_work(self) -> bool:
         """Check if profile has open to work badge."""
         try:
-            # Look for open to work indicator
-            img_title = await self.get_attribute_safe(
-                ".pv-top-card-profile-picture img", "title", default=""
+            top_text = await self.page.locator("main").evaluate(
+                "(el) => el.innerText.slice(0, 1200)"
             )
-            return "#OPEN_TO_WORK" in img_title.upper()
-        except:
+            return "open to work" in top_text.lower()
+        except Exception:
             return False
 
     async def _get_about(self) -> Optional[str]:
         """Extract about section."""
         try:
-            # Find the profile card that contains "About"
-            profile_cards = await self.page.locator(
-                '[data-view-name="profile-card"]'
-            ).all()
+            about_heading = self.page.locator('h2:has-text("About")').first
+            if await about_heading.count() == 0:
+                return None
 
-            for card in profile_cards:
-                card_text = await card.inner_text()
-                # Check if this card contains "About" heading
-                if card_text.strip().startswith("About"):
-                    # Get the span with aria-hidden to avoid duplication
-                    about_spans = await card.locator('span[aria-hidden="true"]').all()
-                    # Skip the first span (it's the "About" heading), get the content
-                    if len(about_spans) > 1:
-                        about_text = await about_spans[1].text_content()
-                        return about_text.strip() if about_text else None
+            about_section = about_heading.locator("xpath=ancestor::section[1]")
+            if await about_section.count() == 0:
+                about_section = about_heading.locator("xpath=ancestor::*[.//*[@data-testid='expandable-text-box']][1]")
+
+            if await about_section.count() == 0:
+                return None
+
+            expand_button = about_section.locator('[data-testid="expandable-text-button"]').first
+            if await expand_button.count() > 0:
+                try:
+                    await expand_button.click(timeout=2000)
+                    await self.wait_and_focus(0.5)
+                except Exception:
+                    logger.debug("About expand button was not clickable")
+
+            about_box = about_section.locator('[data-testid="expandable-text-box"]').first
+            if await about_box.count() > 0:
+                about_text = await about_box.text_content()
+                if about_text:
+                    cleaned = about_text.replace("… more", "").strip()
+                    return cleaned or None
 
             return None
         except Exception as e:
@@ -211,6 +259,9 @@ class PersonScraper(BaseScraper):
                     except Exception as e:
                         logger.debug(f"Error parsing experience item: {e}")
                         continue
+
+            if not experiences:
+                experiences = await self._get_experiences_from_detail_cards()
 
         except Exception as e:
             logger.warning(
@@ -499,6 +550,7 @@ class PersonScraper(BaseScraper):
             return None, None, None
 
         try:
+            work_times = work_times.replace("–", "-")
             # Split by · to separate date range from duration
             parts = work_times.split("·")
             times = parts[0].strip() if len(parts) > 0 else ""
@@ -570,6 +622,9 @@ class PersonScraper(BaseScraper):
                     except Exception as e:
                         logger.debug(f"Error parsing education item: {e}")
                         continue
+
+            if not educations:
+                educations = await self._get_educations_from_detail_cards()
 
         except Exception as e:
             logger.warning(
@@ -740,6 +795,7 @@ class PersonScraper(BaseScraper):
             return None, None
 
         try:
+            times = times.replace("–", "-")
             # Split by " - " to get from and to dates
             if " - " in times:
                 parts = times.split(" - ")
@@ -754,6 +810,135 @@ class PersonScraper(BaseScraper):
         except Exception as e:
             logger.debug(f"Error parsing education times '{times}': {e}")
             return None, None
+
+    async def _get_experiences_from_detail_cards(self) -> list[Experience]:
+        """Fallback parser for current LinkedIn details/experience page."""
+        experiences = []
+
+        try:
+            cards = await self._extract_detail_cards("/details/experience/edit/forms/")
+            for card in cards:
+                text = card.get("text", "")
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                if len(lines) < 3:
+                    continue
+
+                position_title = lines[0]
+                company_line = lines[1]
+                work_times = lines[2]
+                location = lines[3] if len(lines) > 3 else None
+
+                company_name = company_line.split(" · ")[0].strip()
+                if location and " · " in location:
+                    location = location.split(" · ")[0].strip()
+
+                parent_lines = [
+                    line.strip()
+                    for line in card.get("parent_text", "").splitlines()
+                    if line.strip()
+                ]
+                description_lines = []
+                for line in parent_lines[4:]:
+                    if re.search(r"\+\d+\s+skills?$", line, re.IGNORECASE):
+                        break
+                    if re.search(r"\bskills?$", line, re.IGNORECASE):
+                        break
+                    description_lines.append(line)
+
+                from_date, to_date, duration = self._parse_work_times(work_times)
+                experiences.append(
+                    Experience(
+                        position_title=position_title,
+                        institution_name=company_name or None,
+                        linkedin_url=card.get("entity_url"),
+                        from_date=from_date,
+                        to_date=to_date,
+                        duration=duration,
+                        location=location,
+                        description="\n".join(description_lines).strip() or None,
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"Error parsing experience detail cards: {e}")
+
+        return experiences
+
+    async def _get_educations_from_detail_cards(self) -> list[Education]:
+        """Fallback parser for current LinkedIn details/education page."""
+        educations = []
+
+        try:
+            cards = await self._extract_detail_cards("/details/education/edit/forms/")
+            for card in cards:
+                text = card.get("text", "")
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                if len(lines) < 2:
+                    continue
+
+                institution_name = lines[0]
+                degree = lines[1] if len(lines) > 2 else None
+                times = lines[2] if len(lines) > 2 else lines[1]
+
+                parent_lines = [
+                    line.strip()
+                    for line in card.get("parent_text", "").splitlines()
+                    if line.strip()
+                ]
+                description_lines = []
+                for line in parent_lines[len(lines):]:
+                    if line.lower().startswith("grade:"):
+                        continue
+                    description_lines.append(line)
+
+                from_date, to_date = self._parse_education_times(times)
+                educations.append(
+                    Education(
+                        institution_name=institution_name,
+                        degree=degree,
+                        linkedin_url=card.get("entity_url"),
+                        from_date=from_date,
+                        to_date=to_date,
+                        description="\n".join(description_lines).strip() or None,
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"Error parsing education detail cards: {e}")
+
+        return educations
+
+    async def _extract_detail_cards(self, href_fragment: str) -> list[dict]:
+        """Extract visible detail cards from current page by edit-form link."""
+        try:
+            return await self.page.evaluate(
+                """(hrefFragment) => {
+                    const seen = new Set();
+                    return Array.from(document.querySelectorAll(`main a[href*="${hrefFragment}"]`))
+                        .map((a) => {
+                            const text = (a.innerText || "").trim();
+                            if (!text || seen.has(a.href)) {
+                                return null;
+                            }
+                            seen.add(a.href);
+                            const parent = a.parentElement;
+                            const entityLink = parent
+                                ? Array.from(parent.querySelectorAll('a[href*="/company/"], a[href*="/school/"]'))
+                                    .map((link) => link.href)
+                                    .find(Boolean)
+                                : null;
+                            return {
+                                href: a.href,
+                                text,
+                                parent_text: (parent?.innerText || "").trim(),
+                                entity_url: entityLink || null,
+                            };
+                        })
+                        .filter(Boolean);
+                }""",
+                href_fragment,
+            )
+        except Exception as e:
+            logger.debug(f"Error extracting detail cards for {href_fragment}: {e}")
+            return []
 
     async def _get_interests(self, base_url: str) -> list[Interest]:
         """Extract interests from the main profile page Interests section with tablist."""
@@ -807,34 +992,36 @@ class PersonScraper(BaseScraper):
 
                 if not tabs:
                     logger.debug("No interests tabs found on profile")
-                    return interests
-
-                for tab in tabs:
-                    try:
-                        tab_name = await tab.text_content()
-                        if not tab_name:
-                            continue
-                        tab_name = tab_name.strip()
-                        category = self._map_interest_tab_to_category(tab_name)
-
-                        await tab.click()
-                        await self.wait_and_focus(0.8)
-
-                        tabpanel = self.page.locator('[role="tabpanel"], tabpanel').first
-                        list_items = await tabpanel.locator("listitem, li, .pvs-list__paged-list-item").all()
-
-                        for item in list_items:
-                            try:
-                                interest = await self._parse_interest_item(item, category)
-                                if interest:
-                                    interests.append(interest)
-                            except Exception as e:
-                                logger.debug(f"Error parsing interest item: {e}")
+                else:
+                    for tab in tabs:
+                        try:
+                            tab_name = await tab.text_content()
+                            if not tab_name:
                                 continue
+                            tab_name = tab_name.strip()
+                            category = self._map_interest_tab_to_category(tab_name)
 
-                    except Exception as e:
-                        logger.debug(f"Error processing interest tab: {e}")
-                        continue
+                            await tab.click()
+                            await self.wait_and_focus(0.8)
+
+                            tabpanel = self.page.locator('[role="tabpanel"], tabpanel').first
+                            list_items = await tabpanel.locator("listitem, li, .pvs-list__paged-list-item").all()
+
+                            for item in list_items:
+                                try:
+                                    interest = await self._parse_interest_item(item, category)
+                                    if interest:
+                                        interests.append(interest)
+                                except Exception as e:
+                                    logger.debug(f"Error parsing interest item: {e}")
+                                    continue
+
+                        except Exception as e:
+                            logger.debug(f"Error processing interest tab: {e}")
+                            continue
+
+            if not interests:
+                interests = await self._get_interests_from_detail_tabs(base_url)
 
         except Exception as e:
             logger.warning(f"Error getting interests: {e}")
@@ -1097,6 +1284,9 @@ class PersonScraper(BaseScraper):
                     logger.debug(f"Error parsing contact section: {e}")
                     continue
 
+            if not contacts:
+                contacts = await self._get_contacts_from_overlay_text()
+
         except Exception as e:
             logger.warning(f"Error getting contacts: {e}")
 
@@ -1120,3 +1310,183 @@ class PersonScraper(BaseScraper):
         elif "address" in heading:
             return "address"
         return None
+
+    async def _get_contacts_from_overlay_text(self) -> list[Contact]:
+        """Fallback parser for the current contact-info overlay."""
+        contacts = []
+
+        try:
+            text = await self.page.locator("body").evaluate(
+                "(el) => el.innerText.slice(0, 2500)"
+            )
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            stop_markers = {
+                "Enhance your profile with AI-powered suggestions",
+                "Edit contact info",
+            }
+            section_names = {
+                "Your profile": "linkedin",
+                "Website": "website",
+                "Phone": "phone",
+                "Email": "email",
+                "IM": "im",
+                "Birthday": "birthday",
+                "Address": "address",
+            }
+
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                if line in stop_markers:
+                    break
+                contact_type = section_names.get(line)
+                if not contact_type:
+                    i += 1
+                    continue
+
+                i += 1
+                values = []
+                while i < len(lines) and lines[i] not in section_names and lines[i] not in stop_markers:
+                    values.append(lines[i])
+                    i += 1
+
+                if contact_type == "im":
+                    for value in values:
+                        label = None
+                        if value.endswith(")") and "(" in value:
+                            raw_value, raw_label = value.rsplit("(", 1)
+                            value = raw_value.strip()
+                            label = raw_label[:-1].strip()
+                        if value:
+                            contacts.append(Contact(type="im", value=value, label=label))
+                else:
+                    if not values:
+                        continue
+                    value = values[0]
+                    label = None
+                    if value.endswith(")") and "(" in value and contact_type in {"website", "phone"}:
+                        raw_value, raw_label = value.rsplit("(", 1)
+                        value = raw_value.strip()
+                        label = raw_label[:-1].strip()
+                    contacts.append(Contact(type=contact_type, value=value, label=label))
+        except Exception as e:
+            logger.debug(f"Error parsing contacts from overlay text: {e}")
+
+        return contacts
+
+    async def _get_interests_from_detail_tabs(self, base_url: str) -> list[Interest]:
+        """Fallback parser for current LinkedIn interests detail page."""
+        interests = []
+        seen = set()
+
+        try:
+            interests_url = urljoin(base_url, "details/interests/")
+            await self.navigate_and_wait(interests_url)
+            await self.page.wait_for_selector("main", timeout=10000)
+            await self.wait_and_focus(1.5)
+
+            tab_labels = [
+                "Top Voices",
+                "Companies",
+                "Groups",
+                "Newsletters",
+                "Schools",
+            ]
+
+            for tab_name in tab_labels:
+                tab = self.page.get_by_text(tab_name, exact=True).first
+                if await tab.count() == 0:
+                    continue
+
+                try:
+                    await tab.click(timeout=3000)
+                    await self.wait_and_focus(0.8)
+                except Exception:
+                    logger.debug(f"Could not click interests tab: {tab_name}")
+                    continue
+
+                category = self._map_interest_tab_to_category(tab_name)
+                cards = await self.page.evaluate(
+                    """(tabName) => {
+                        const main = document.querySelector('main');
+                        if (!main) return [];
+                        const allLinks = Array.from(main.querySelectorAll('a[href]'));
+                        return allLinks.map((a) => {
+                            const href = a.href || '';
+                            const text = (a.innerText || a.textContent || '').trim();
+                            if (!text) return null;
+                            const lines = text.split('\\n').map((line) => line.trim()).filter(Boolean);
+                            const name = lines[0];
+                            if (!name || name === tabName || name === 'Load more' || name === 'View' || name === 'Following' || name === 'Joined' || name === 'Subscribed') {
+                                return null;
+                            }
+                            return { href, name };
+                        }).filter(Boolean);
+                    }""",
+                    tab_name,
+                )
+
+                for card in cards:
+                    href = card.get("href")
+                    name = card.get("name")
+                    if not name:
+                        continue
+                    if not self._is_valid_interest_candidate(category, href, name):
+                        continue
+                    key = (category, name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    interests.append(
+                        Interest(
+                            name=name,
+                            category=category,
+                            linkedin_url=href or None,
+                        )
+                    )
+        except Exception as e:
+            logger.debug(f"Error parsing interests from detail tabs: {e}")
+
+        return interests
+
+    def _is_valid_interest_candidate(
+        self, category: str, href: Optional[str], name: str
+    ) -> bool:
+        """Filter out footer/navigation links from interest cards."""
+        if not href or not name:
+            return False
+
+        href = href.lower()
+        name = name.strip()
+        blocked_names = {
+            "About",
+            "Accessibility",
+            "Talent Solutions",
+            "Community Guidelines",
+            "Careers",
+            "Marketing Solutions",
+            "Ad Choices",
+            "Advertising",
+            "Sales Solutions",
+            "Mobile",
+            "Small Business",
+            "Safety Center",
+            "Questions?",
+            "Manage your account and privacy",
+            "Recommendation transparency",
+        }
+        if name in blocked_names:
+            return False
+
+        if category == "influencer":
+            return "/in/" in href
+        if category == "company":
+            return "/company/" in href or "/showcase/" in href
+        if category == "group":
+            return "/groups/" in href
+        if category == "newsletter":
+            return "/newsletters/" in href
+        if category == "school":
+            return "/school/" in href
+
+        return False
