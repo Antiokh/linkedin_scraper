@@ -20,6 +20,8 @@
   - `samples/collect_market_map.py`
 - Обогащение лидеров по engagement:
   - `samples/enrich_leader_influence.py`
+- Отдельная маркетинговая рамка:
+  - `MARKETING_BRIEF.md`
 
 ## Установка
 
