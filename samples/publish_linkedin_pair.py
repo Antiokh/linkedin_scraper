@@ -7,6 +7,12 @@ Publish a coordinated LinkedIn pair:
 
 import argparse
 import asyncio
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from linkedin_scraper.core.browser import BrowserManager
 from linkedin_scraper.core.post_log import ensure_post_log, extract_external_id, insert_post_row

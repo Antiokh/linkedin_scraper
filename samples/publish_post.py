@@ -9,8 +9,15 @@ when you provide the source post URL.
 
 import argparse
 import asyncio
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from linkedin_scraper.core.browser import BrowserManager
+from linkedin_scraper.core.post_log import ensure_post_log, extract_external_id, insert_post_row
 from linkedin_scraper.scrapers.publisher import PostPublisher
 
 
@@ -21,6 +28,10 @@ async def main() -> None:
     parser.add_argument("--company-url", help="LinkedIn company URL for company posts")
     parser.add_argument("--source-post-url", help="LinkedIn post URL to native-repost from a personal profile")
     parser.add_argument("--text", required=True, help="Post text")
+    parser.add_argument("--topic", help="Topic label for SQLite logging")
+    parser.add_argument("--angle", help="Angle/summary for SQLite logging")
+    parser.add_argument("--log-db", help="Path to NeedleBit post_log.sqlite")
+    parser.add_argument("--log-schema", help="Path to post_log_schema.sql")
     parser.add_argument(
         "--publish",
         action="store_true",
@@ -57,6 +68,28 @@ async def main() -> None:
                 source_post_url=args.source_post_url,
                 text=args.text,
                 dry_run=not args.publish,
+            )
+
+        if args.log_db and args.log_schema and args.publish:
+            target = "company page" if args.actor == "company" else "personal profile"
+            default_topic = {
+                "company": "LinkedIn company post",
+                "person": "LinkedIn personal post",
+                "person-repost": "LinkedIn personal repost",
+            }[args.actor]
+            ensure_post_log(args.log_db, args.log_schema)
+            insert_post_row(
+                args.log_db,
+                channel="linkedin",
+                target=target,
+                topic=args.topic or default_topic,
+                angle=args.angle,
+                body=args.text,
+                status="posted",
+                external_id=extract_external_id(result.post_url),
+                external_url=result.post_url,
+                source_file=__file__,
+                notes="Logged by publish_post.py",
             )
 
         print(result.to_json(indent=2))
