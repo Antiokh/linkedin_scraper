@@ -321,20 +321,17 @@ class PostPublisher(BaseScraper):
         return mention_inserted
 
     async def _type_text_with_mentions(self, editor, text: str, mentions, container=None) -> bool:
-        """Type text piecewise so LinkedIn can resolve @mentions into entity links."""
+        """Type text as: prefix -> mention -> suffix, preserving contextual placement."""
         await editor.click()
         await self.wait_and_focus(0.5)
         await self._clear_editor(editor)
 
         mention_inserted = False
-        cursor = 0
-        for match in mentions:
-            prefix = text[cursor:match.start()]
+        for prefix, mention_name, suffix in self._split_text_around_mentions(text, mentions):
             if prefix:
                 await self.page.keyboard.type(prefix, delay=10)
                 await self.wait_and_focus(0.2)
 
-            mention_name = match.group(1).strip()
             inserted = await self._insert_company_mention(mention_name)
             mention_inserted = mention_inserted or inserted
             if not inserted:
@@ -342,17 +339,29 @@ class PostPublisher(BaseScraper):
                 await self.page.keyboard.type("@" + mention_name, delay=10)
                 await self.wait_and_focus(0.2)
 
-            cursor = match.end()
-
-        suffix = text[cursor:]
-        if suffix:
-            await self.page.keyboard.type(suffix, delay=10)
-            await self.wait_and_focus(0.3)
+            if suffix:
+                await self.page.keyboard.type(suffix, delay=10)
+                await self.wait_and_focus(0.3)
 
         if not await self._editor_contains_text(self._plain_text_for_validation(text), container=container):
             await self._set_editor_text_via_dom(editor, text)
             await self.wait_and_focus(0.5)
         return mention_inserted
+
+    def _split_text_around_mentions(self, text: str, mentions):
+        """
+        Yield segments as:
+        - text before current mention
+        - mention name without '@'
+        - text after current mention until the next mention or end of string
+        """
+        for index, match in enumerate(mentions):
+            prefix_start = 0 if index == 0 else mentions[index - 1].end()
+            suffix_end = len(text) if index + 1 >= len(mentions) else mentions[index + 1].start()
+            prefix = text[prefix_start:match.start()]
+            mention_name = match.group(1).strip()
+            suffix = text[match.end():suffix_end]
+            yield prefix, mention_name, suffix
 
     async def _insert_company_mention(self, mention_name: str) -> bool:
         """Insert a LinkedIn @mention by selecting the typeahead option."""
