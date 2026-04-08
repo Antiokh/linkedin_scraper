@@ -122,7 +122,11 @@ class PostPublisher(BaseScraper):
 
             await self._submit_post(container=dialog)
             result.submitted = True
-            result.post_url = self.page.url
+            await self.wait_and_focus(3)
+            result.post_url = (
+                await self._extract_repost_post_url(text, source_post_url)
+                or self.page.url
+            )
             await self.callback.on_complete("publish_person_repost", result)
             return result
         except Exception as e:
@@ -575,6 +579,90 @@ class PostPublisher(BaseScraper):
             if "/feed/update/" in clean:
                 return clean
         return None
+
+    async def _extract_repost_post_url(self, text: str, source_post_url: str) -> Optional[str]:
+        """Best-effort extraction of the new personal repost URL after submission."""
+        source_clean = self._normalize_post_url(source_post_url)
+
+        direct = await self._extract_success_post_url(source_clean)
+        if direct:
+            return direct
+
+        return await self._extract_recent_activity_post_url(text, source_clean)
+
+    async def _extract_success_post_url(self, source_clean: str) -> Optional[str]:
+        """Try to read a fresh post URL from the current page or success UI."""
+        try:
+            hrefs = await self.page.locator('a[href*="/feed/update/"]').evaluate_all(
+                """
+                els => els.map((a) => ({
+                    href: a.href,
+                    text: (a.innerText || a.textContent || '').trim()
+                }))
+                """
+            )
+        except Exception:
+            return None
+
+        seen = set()
+        for item in hrefs:
+            href = (item.get("href") or "").strip()
+            if not href or href in seen:
+                continue
+            seen.add(href)
+            clean = self._normalize_post_url(href)
+            label = (item.get("text") or "").strip().lower()
+            if clean == source_clean:
+                continue
+            if "/feed/update/" in clean:
+                return href
+        return None
+
+    async def _extract_recent_activity_post_url(self, text: str, source_clean: str) -> Optional[str]:
+        """Fallback: find the fresh repost by matching its commentary in recent activity."""
+        snippet = self._plain_text_for_validation(text)
+        if not snippet:
+            return None
+
+        try:
+            await self.navigate_and_wait("https://www.linkedin.com/in/nazarovanton/recent-activity/all/")
+            await self.page.wait_for_selector("main, body", timeout=10000)
+            await self.wait_and_focus(2)
+        except Exception:
+            return None
+
+        script = """
+        ({snippet, sourceClean}) => {
+            const normalize = (value) =>
+                (value || '')
+                    .replace(/\\u00a0/g, ' ')
+                    .replace(/\\s+/g, ' ')
+                    .trim()
+                    .toLowerCase();
+
+            const wanted = normalize(snippet);
+            if (!wanted) return null;
+
+            const cards = Array.from(document.querySelectorAll('article, .feed-shared-update-v2, .occludable-update'));
+            for (const card of cards) {
+                const text = normalize(card.innerText || card.textContent || '');
+                if (!text.includes(wanted)) continue;
+                const links = Array.from(card.querySelectorAll('a[href*="/feed/update/"]'));
+                for (const link of links) {
+                    const href = (link.href || '').trim();
+                    if (!href) continue;
+                    const clean = href.split('?', 1)[0].replace(/\\/+$/, '') + '/';
+                    if (clean === sourceClean) continue;
+                    return href;
+                }
+            }
+            return null;
+        }
+        """
+        try:
+            return await self.page.evaluate(script, {"snippet": snippet[:280], "sourceClean": source_clean})
+        except Exception:
+            return None
 
     async def _switch_interaction_identity(self, identity_name: str) -> None:
         """Open the identity switcher and select the desired actor if available."""
