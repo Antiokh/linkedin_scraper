@@ -338,6 +338,7 @@ class PostPublisher(BaseScraper):
             inserted = await self._insert_company_mention(mention_name)
             mention_inserted = mention_inserted or inserted
             if not inserted:
+                await self._remove_partial_mention_token(editor, mention_name)
                 await self.page.keyboard.type("@" + mention_name, delay=10)
                 await self.wait_and_focus(0.2)
 
@@ -362,18 +363,14 @@ class PostPublisher(BaseScraper):
         if await option.count() == 0:
             return False
         try:
-            await option.click(timeout=3000, force=True)
+            await self.page.keyboard.press("ArrowDown")
+            await self.wait_and_focus(0.2)
+            await self.page.keyboard.press("Enter")
             await self.wait_and_focus(0.8)
-            return True
         except Exception:
-            try:
-                await self.page.keyboard.press("ArrowDown")
-                await self.wait_and_focus(0.2)
-                await self.page.keyboard.press("Enter")
-                await self.wait_and_focus(0.8)
-                return True
-            except Exception:
-                return False
+            return False
+
+        return await self._editor_has_entity_mention(mention_name)
 
     async def _editor_contains_text(self, text: str, container=None) -> bool:
         """Verify that at least one visible editor contains the typed text."""
@@ -436,6 +433,50 @@ class PostPublisher(BaseScraper):
                 }
                 """
             )
+        except Exception:
+            pass
+
+    async def _editor_has_entity_mention(self, mention_name: str) -> bool:
+        """Check whether the editor contains a real LinkedIn mention entity, not plain text."""
+        script = """
+        (target) => {
+            const nodes = Array.from(document.querySelectorAll(
+                'a.ql-mention, [data-test-ql-mention=\"true\"]'
+            ));
+            return nodes.some((el) => {
+                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                const original = (el.getAttribute('data-original-text') || '').trim().toLowerCase();
+                return text === target || original === target;
+            });
+        }
+        """
+        try:
+            return await self.page.evaluate(script, mention_name.strip().lower())
+        except Exception:
+            return False
+
+    async def _remove_partial_mention_token(self, editor, mention_name: str) -> None:
+        """Remove a failed raw @mention token before falling back to plain text."""
+        token = f"@{mention_name}"
+        try:
+            await editor.evaluate(
+                """
+                (el, rawToken) => {
+                    const text = (el.innerText || el.textContent || '');
+                    if (!text.endsWith(rawToken)) return;
+                    const trimmed = text.slice(0, -rawToken.length);
+                    el.innerHTML = '';
+                    el.textContent = trimmed;
+                    el.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'deleteContentBackward',
+                    }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                """,
+                token,
+            )
+            await self.wait_and_focus(0.2)
         except Exception:
             pass
 
