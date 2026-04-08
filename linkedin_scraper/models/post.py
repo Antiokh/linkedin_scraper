@@ -37,9 +37,11 @@ class PublishResult(BaseModel):
     composer_opened: bool = False
     text_filled: bool = False
     submitted: bool = False
+    mention_inserted: bool = False
     visibility: Optional[str] = None
     destination_url: Optional[str] = None
     post_url: Optional[str] = None
+    source_post_url: Optional[str] = None
     message: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:

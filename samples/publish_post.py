@@ -2,9 +2,9 @@
 """
 Example: Prepare or publish a LinkedIn post as a person or company.
 
-Company posting is the more reliable path at the moment because LinkedIn exposes
-an admin share route directly. Personal posting is implemented as best-effort
-UI automation and may fail if LinkedIn changes the feed composer flow.
+Company posting is reliable through the admin share route. Personal posting
+works via UI automation. Native reposts from a personal profile are supported
+when you provide the source post URL.
 """
 
 import argparse
@@ -17,8 +17,9 @@ from linkedin_scraper.scrapers.publisher import PostPublisher
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="linkedin_session.json")
-    parser.add_argument("--actor", choices=["person", "company"], required=True)
+    parser.add_argument("--actor", choices=["person", "company", "person-repost"], required=True)
     parser.add_argument("--company-url", help="LinkedIn company URL for company posts")
+    parser.add_argument("--source-post-url", help="LinkedIn post URL to native-repost from a personal profile")
     parser.add_argument("--text", required=True, help="Post text")
     parser.add_argument(
         "--publish",
@@ -44,8 +45,16 @@ async def main() -> None:
                 text=args.text,
                 dry_run=not args.publish,
             )
-        else:
+        elif args.actor == "person":
             result = await publisher.publish_person_post(
+                text=args.text,
+                dry_run=not args.publish,
+            )
+        else:
+            if not args.source_post_url:
+                raise SystemExit("--source-post-url is required for --actor person-repost")
+            result = await publisher.publish_person_repost(
+                source_post_url=args.source_post_url,
                 text=args.text,
                 dry_run=not args.publish,
             )
