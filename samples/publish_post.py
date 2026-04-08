@@ -17,11 +17,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from linkedin_scraper.core.browser import BrowserManager
-from linkedin_scraper.core.post_log import ensure_post_log, extract_external_id, insert_post_row
+from linkedin_scraper.core.post_log import (
+    ensure_post_log,
+    extract_external_id,
+    insert_post_row,
+    resolve_post_log_paths,
+)
 from linkedin_scraper.scrapers.publisher import PostPublisher
 
 
 async def main() -> None:
+    default_log_db, default_log_schema = resolve_post_log_paths()
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="linkedin_session.json")
     parser.add_argument("--actor", choices=["person", "company", "person-repost"], required=True)
@@ -30,8 +36,16 @@ async def main() -> None:
     parser.add_argument("--text", required=True, help="Post text")
     parser.add_argument("--topic", help="Topic label for SQLite logging")
     parser.add_argument("--angle", help="Angle/summary for SQLite logging")
-    parser.add_argument("--log-db", help="Path to NeedleBit post_log.sqlite")
-    parser.add_argument("--log-schema", help="Path to post_log_schema.sql")
+    parser.add_argument(
+        "--log-db",
+        default=str(default_log_db),
+        help="Path to NeedleBit post_log.sqlite. Defaults to the canonical path or NEEDLEBIT_POST_LOG_DB.",
+    )
+    parser.add_argument(
+        "--log-schema",
+        default=str(default_log_schema),
+        help="Path to post_log_schema.sql. Defaults to the canonical path or NEEDLEBIT_POST_LOG_SCHEMA.",
+    )
     parser.add_argument(
         "--publish",
         action="store_true",
@@ -70,16 +84,17 @@ async def main() -> None:
                 dry_run=not args.publish,
             )
 
-        if args.log_db and args.log_schema and args.publish:
+        if args.publish:
             target = "company page" if args.actor == "company" else "personal profile"
             default_topic = {
                 "company": "LinkedIn company post",
                 "person": "LinkedIn personal post",
                 "person-repost": "LinkedIn personal repost",
             }[args.actor]
-            ensure_post_log(args.log_db, args.log_schema)
+            log_db, log_schema = resolve_post_log_paths(args.log_db, args.log_schema)
+            ensure_post_log(log_db, log_schema)
             insert_post_row(
-                args.log_db,
+                log_db,
                 channel="linkedin",
                 target=target,
                 topic=args.topic or default_topic,

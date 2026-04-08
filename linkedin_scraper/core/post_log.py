@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
+
+DEFAULT_LOG_DB = Path(
+    os.environ.get(
+        "NEEDLEBIT_POST_LOG_DB",
+        r"C:\git\needlebit-marketing\core\post_log.sqlite",
+    )
+)
+DEFAULT_LOG_SCHEMA = Path(
+    os.environ.get(
+        "NEEDLEBIT_POST_LOG_SCHEMA",
+        r"C:\git\needlebit-marketing\core\post_log_schema.sql",
+    )
+)
+
+
+def resolve_post_log_paths(
+    db_path: str | Path | None = None,
+    schema_path: str | Path | None = None,
+) -> tuple[Path, Path]:
+    """Resolve SQLite log paths from explicit args, env vars, or canonical defaults."""
+    db = Path(db_path) if db_path else DEFAULT_LOG_DB
+    schema = Path(schema_path) if schema_path else DEFAULT_LOG_SCHEMA
+    return db, schema
 
 
 def ensure_post_log(db_path: str | Path, schema_path: str | Path) -> None:
