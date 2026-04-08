@@ -18,10 +18,17 @@ from linkedin_scraper.core.browser import BrowserManager
 from linkedin_scraper.core.post_log import (
     ensure_post_log,
     extract_external_id,
-    insert_post_row,
+    insert_source_with_entities,
     resolve_post_log_paths,
 )
 from linkedin_scraper.scrapers.publisher import PostPublisher
+
+
+def build_source_notes(*parts: str | None) -> str | None:
+    values = [part.strip() for part in parts if part and part.strip()]
+    if not values:
+        return None
+    return "\n".join(values)
 
 
 async def main() -> None:
@@ -31,9 +38,12 @@ async def main() -> None:
     parser.add_argument("--company-url", required=True, help="LinkedIn company URL or admin share URL")
     parser.add_argument("--company-text", required=True, help="English company post text")
     parser.add_argument("--personal-text", required=True, help="Russian personal repost commentary")
+    parser.add_argument("--original-text", help="Original source thought for the shared source-row. Defaults to --personal-text.")
+    parser.add_argument("--content-plan-id", help="Optional content plan id for the source-row.")
     parser.add_argument("--topic", help="Shared topic label for SQLite logging")
     parser.add_argument("--company-angle", help="Angle for the company post row")
     parser.add_argument("--personal-angle", help="Angle for the personal repost row")
+    parser.add_argument("--notes", help="Optional source-row notes for SQLite logging")
     parser.add_argument(
         "--source-post-url",
         help="Existing company post URL to use for the native repost. Useful in dry-run mode.",
@@ -86,32 +96,36 @@ async def main() -> None:
         if args.publish:
             log_db, log_schema = resolve_post_log_paths(args.log_db, args.log_schema)
             ensure_post_log(log_db, log_schema)
-            shared_topic = args.topic or "LinkedIn pair"
-            insert_post_row(
+            insert_source_with_entities(
                 log_db,
-                channel="linkedin",
-                target="company page",
-                topic=shared_topic,
-                angle=args.company_angle,
-                body=args.company_text,
-                status="posted",
-                external_id=extract_external_id(company_result.post_url),
-                external_url=company_result.post_url,
-                source_file=__file__,
-                notes="Logged by publish_linkedin_pair.py",
-            )
-            insert_post_row(
-                log_db,
-                channel="linkedin",
-                target="personal profile",
-                topic=shared_topic,
-                angle=args.personal_angle,
-                body=args.personal_text,
-                status="posted",
-                external_id=extract_external_id(personal_result.post_url),
-                external_url=personal_result.post_url,
-                source_file=__file__,
-                notes="Logged by publish_linkedin_pair.py",
+                original_text=args.original_text or args.personal_text,
+                content_plan_id=args.content_plan_id,
+                notes=build_source_notes(
+                    f"Topic: {args.topic}" if args.topic else None,
+                    f"Company angle: {args.company_angle}" if args.company_angle else None,
+                    f"Personal angle: {args.personal_angle}" if args.personal_angle else None,
+                    args.notes,
+                    "Logged by publish_linkedin_pair.py",
+                ),
+                all_networks_done=True,
+                entities=[
+                    {
+                        "entity_type": "linkedin_company",
+                        "content": args.company_text,
+                        "post_id": extract_external_id(company_result.post_url),
+                        "post_link": company_result.post_url,
+                        "status": "posted",
+                        "response_json": company_result.to_json(),
+                    },
+                    {
+                        "entity_type": "linkedin_personal",
+                        "content": args.personal_text,
+                        "post_id": extract_external_id(personal_result.post_url),
+                        "post_link": personal_result.post_url,
+                        "status": "posted",
+                        "response_json": personal_result.to_json(),
+                    },
+                ],
             )
 
         print(

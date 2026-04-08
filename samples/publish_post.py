@@ -20,10 +20,18 @@ from linkedin_scraper.core.browser import BrowserManager
 from linkedin_scraper.core.post_log import (
     ensure_post_log,
     extract_external_id,
-    insert_post_row,
+    insert_source_with_entities,
+    infer_entity_type,
     resolve_post_log_paths,
 )
 from linkedin_scraper.scrapers.publisher import PostPublisher
+
+
+def build_source_notes(*parts: str | None) -> str | None:
+    values = [part.strip() for part in parts if part and part.strip()]
+    if not values:
+        return None
+    return "\n".join(values)
 
 
 async def main() -> None:
@@ -34,8 +42,11 @@ async def main() -> None:
     parser.add_argument("--company-url", help="LinkedIn company URL for company posts")
     parser.add_argument("--source-post-url", help="LinkedIn post URL to native-repost from a personal profile")
     parser.add_argument("--text", required=True, help="Post text")
+    parser.add_argument("--original-text", help="Original source thought for the source-row. Defaults to --text.")
+    parser.add_argument("--content-plan-id", help="Optional content plan id for the source-row.")
     parser.add_argument("--topic", help="Topic label for SQLite logging")
     parser.add_argument("--angle", help="Angle/summary for SQLite logging")
+    parser.add_argument("--notes", help="Optional source-row notes for SQLite logging")
     parser.add_argument(
         "--log-db",
         default=str(default_log_db),
@@ -93,18 +104,28 @@ async def main() -> None:
             }[args.actor]
             log_db, log_schema = resolve_post_log_paths(args.log_db, args.log_schema)
             ensure_post_log(log_db, log_schema)
-            insert_post_row(
+            entity_type = infer_entity_type("linkedin", target)
+            insert_source_with_entities(
                 log_db,
-                channel="linkedin",
-                target=target,
-                topic=args.topic or default_topic,
-                angle=args.angle,
-                body=args.text,
-                status="posted",
-                external_id=extract_external_id(result.post_url),
-                external_url=result.post_url,
-                source_file=__file__,
-                notes="Logged by publish_post.py",
+                original_text=args.original_text or args.text,
+                content_plan_id=args.content_plan_id,
+                notes=build_source_notes(
+                    f"Topic: {args.topic}" if args.topic else None,
+                    f"Angle: {args.angle}" if args.angle else None,
+                    args.notes,
+                    "Logged by publish_post.py",
+                ),
+                all_networks_done=True,
+                entities=[
+                    {
+                        "entity_type": entity_type,
+                        "content": args.text,
+                        "post_id": extract_external_id(result.post_url),
+                        "post_link": result.post_url,
+                        "status": "posted",
+                        "response_json": result.to_json(),
+                    }
+                ],
             )
 
         print(result.to_json(indent=2))
