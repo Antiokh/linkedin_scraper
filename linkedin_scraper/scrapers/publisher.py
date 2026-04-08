@@ -344,6 +344,8 @@ class PostPublisher(BaseScraper):
                 await self.wait_and_focus(0.3)
 
         if not await self._editor_contains_text(self._plain_text_for_validation(text), container=container):
+            if mention_inserted:
+                raise ScrapingError("Mention was inserted, but the final text did not validate cleanly.")
             await self._set_editor_text_via_dom(editor, text)
             await self.wait_and_focus(0.5)
         return mention_inserted
@@ -372,12 +374,16 @@ class PostPublisher(BaseScraper):
         if await option.count() == 0:
             return False
         try:
-            await self.page.keyboard.press("ArrowDown")
-            await self.wait_and_focus(0.2)
-            await self.page.keyboard.press("Enter")
+            await option.click(force=True, timeout=3000)
             await self.wait_and_focus(0.8)
         except Exception:
-            return False
+            try:
+                await self.page.keyboard.press("ArrowDown")
+                await self.wait_and_focus(0.2)
+                await self.page.keyboard.press("Enter")
+                await self.wait_and_focus(0.8)
+            except Exception:
+                return False
 
         return await self._editor_has_entity_mention(mention_name)
 
@@ -389,13 +395,20 @@ class PostPublisher(BaseScraper):
 
         script = """
         ({target, rootSelector}) => {
+            const normalize = (value) =>
+                (value || '')
+                    .replace(/\\u00a0/g, ' ')
+                    .replace(/\\s+/g, ' ')
+                    .trim()
+                    .toLowerCase();
             const root = rootSelector ? document.querySelector(rootSelector) : document;
             if (!root) return false;
             const nodes = Array.from(root.querySelectorAll('[contenteditable="true"], textarea'));
+            const wanted = normalize(target);
             return nodes.some((el) => {
                 const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-                const value = (el.innerText || el.textContent || el.value || '').trim();
-                return visible && value.includes(target);
+                const value = normalize(el.innerText || el.textContent || el.value || '');
+                return visible && value.includes(wanted);
             });
         }
         """
