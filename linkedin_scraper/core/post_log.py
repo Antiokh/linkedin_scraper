@@ -272,9 +272,7 @@ def _migrate_legacy_schema(conn: sqlite3.Connection, schema_script: str) -> None
 
     groups: dict[tuple[str, str], list[sqlite3.Row | tuple]] = {}
     for row in legacy_rows:
-        topic = (row[3] or "").strip()
-        created_at = (row[8] or "").strip()
-        key = (topic, created_at)
+        key = _legacy_group_key(row)
         groups.setdefault(key, []).append(row)
 
     for rows in groups.values():
@@ -376,3 +374,17 @@ def _merge_notes(rows: list[tuple]) -> Optional[str]:
         return None
     deduped = list(dict.fromkeys(notes))
     return "\n".join(deduped)
+
+
+def _legacy_group_key(row: tuple) -> tuple[str, str]:
+    """
+    Group legacy rows conservatively:
+    - prefer topic when available
+    - normalize created_at to the minute to keep company/personal pairs together
+    """
+    topic = (row[3] or "").strip()
+    created_at = (row[8] or "").strip()
+    minute_bucket = created_at[:16] if created_at else ""
+    if topic:
+        return topic, minute_bucket
+    return "", minute_bucket
